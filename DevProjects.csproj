@@ -31,6 +31,10 @@
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="AppWrapper, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>..\AppWrapper\bin\Debug\AppWrapper.dll</HintPath>
+    </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Xml.Linq" />
@@ -45,10 +49,6 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\AppWrapper\AppWrapper.csproj">
-      <Project>{d8d26b82-20a5-49a7-82ae-99923113f7d1}</Project>
-      <Name>AppWrapper</Name>
-    </ProjectReference>
     <ProjectReference Include="..\BusinessObjects\BusinessObjects.csproj">
       <Project>{a847b310-12fe-4f61-9d71-3b69b6b5072b}</Project>
       <Name>BusinessObjects</Name>

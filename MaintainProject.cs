@@ -6,6 +6,7 @@ using System.IO;
 using BusinessObjects;
 using DataHelpers;
 using CodeCounter;
+using System.Diagnostics;
 namespace DevProjects
 {
     public enum ProjectStatus
@@ -13,18 +14,14 @@ namespace DevProjects
         Exists = 0,
         Created = 1
     }
+
     /// <summary>
-    /// This class adds new DevProjects and helps maintain ProjectSync Table
-    /// The whole reason for the ProjectSync table is that different devs
+    /// This class adds new DevProjects and maintains ProjectSync Table
+    /// The whole reason for the ProjectSync table is that different developers
     /// could create projects with the same project name but they are 
     /// unrelated, although this is unlikely unless in the case of default
-    /// project names like ConsoleApplication1, ect.
+    /// project names like ConsoleApplication1, etc.
     /// W/o a sync table we can't separate the effort in reports
-    /// NOTE: the assummption is that the likelihood of multiple developers
-    /// adding the same DevProjectName which is unrelated to previous 
-    /// instances of the same project name, at the exact same time, is
-    /// very unlikely and not worthy of trying some locking mechanism or
-    /// doing all the logic in a stored proc.  
     /// 
     /// NOTE: Also, serious corporate developers will us a source control
     /// system.  Further, serious developers should branch their projects
@@ -52,159 +49,197 @@ namespace DevProjects
         #endregion
 
         #region public methods
-        /// <summary>
-        /// If this is the first instance of the DevProjectName in
-        /// DevProjects, add it to DevProjects and ProjectSync table
-        /// and then InsertUpdate ProjectFiles table
-        /// If the DevProjectName is already in DevProjects and there are 
-        /// multiple instances in ProjectSync, link the new one to the one 
-        /// with the matching gitURL.
-        /// 1. Does a project exist for this file in DevProjects?
-        ///     If not, does gitUrl exist?  If not, simply insert a row in DevProjects
-        ///     and write a row to ProjectFiles w/o SyncId or girUrl, no ProjectSync row
-        ///     (revisit contents of these two fields for later update purposes). 
-        /// 2. If project exists, does ProjectSync row exist?  If it does, is there
-        ///     a gitUrl in the path of the file, if so does the ProjectSync URL match 
-        ///     gitUrl found in the local path, if so, simply update/insert ProjectFiles
-        ///     row with line counts etc.  
-        ///     If we have a local gitUrl and it does not match ProjectSync gitUrl, 
-        ///     it means that we have a new project by the same name but it is not the project
-        ///     that we have in DevProjects (having looked at all of them by the name) and
-        ///     we should enter a new ProjectSync with the local gitURL and insert new row in
-        ///     DevProjects, if there is no row for this user/machine.  if there is a row in
-        ///     Devprojects for this user/machine, assume gitUrl is there and if no project 
-        ///     sync record put one there.
-        /// 3. If project does not exist, insert into DevProjects.  If local 
-        ///    gitUrl exists, insert ProjectSync record, putting girUrl in it a
-        ///    and putting SyncID and GitUrl in DevProjects
-        ///    
-        /// 4. Finally, anytime we insert ProjectSync, we have the probablity
-        ///    that ProjectFiles rows exist for the project that do not have
-        ///    SyncID and GitURL populated because the files were written before
-        ///    the project was put into gitHub on the local machine and so 
-        ///    we must be able to UpdateProjectFiles with syncID and gitURL 
-        ///    and therein lies a problem or maybe not...think it thru on paper
-        ///    For example a developer creates a Project in GitHub, clones it
-        ///    down to his local machine, thereby creating a local repo with a
-        ///    accessible gitURL.  Next, they create a project in VS and as the 
-        ///    files are saved this class sees no DevProject row, no ProjectSync
-        ///    row, and creates both, and then has a syncId and girUrl for the
-        ///    ProjectFiles rows, everything is cool, 
-        ///    
-        ///     And if a second or subsequent devs clone the project, they have
-        ///     everything they need, but.........
-        ///    
-        ///    Another developer creates a project by the same name but not from
-        ///    gitHub b/c it is unrelated (not collaborated) and so this class calls
-        ///    InsertUpdateProjectFiles.  Here comes the problem, the files will log to
-        ///    ProjectFiles with empty syncID and gitUrl, and from my testing it appears
-        ///    that continued activity with the same relativeFilename will 
-        ///    write to an existing row for the same project name b/c syncID
-        ///    if I add to the where clause (
-        ///    where (syncid = @syncid and GitUrl = @giturl) 
-        ///    or    (syncid is null and isnull(gitUrl, '') = '')
-        ///    
-        ///    The downside of this is that multiple projects with the
-        ///    same name will accumulate the same RelativeFilename. The
-        ///    positive side of this is that "Relative" Filenames will not
-        ///    often be the same in the few projects (of consequence, i.e.,
-        ///    not ConoleApplication1, WinFormsApplication1, etc.)
-        ///    And if someone really needs to know file stats on one of these
-        ///    projects, the files exist on that dev's machine.
-        ///    
-        ///    On the bright side no duplicate projects are allowed in the same
-        ///    gitHub organization, and other organizations would by definition
-        ///    have a different gitUrl:)  Therefore, for major projects, we
-        ///    should have not many Duplicate Project Names.  We have gone to
-        ///    a huge amount of design, redesign, code, recode just to try
-        ///    to handle a problem that should be a rarity, but 
-        ///    Murphy WAS an Optimist!!!!!
-        ///     
-        /// </summary>
-        /// <param name="newProj"></param>
-        public void CheckForInsertingNewProjectPath(DevProjPath newProj, string fullPath)
+
+        public void CheckForInsertingNewProjectPath(DevProjPath localProj, string fullPath) 
         {
-            // finish setting up newProj with all needed data
-            newProj.Machine = Environment.MachineName;
-            newProj.UserName = Environment.UserName;
-
-            string syncID = Guid.NewGuid().ToString();
-            string gitUrl = GetGitURLFromPath(newProj.DevProjectPath);
-            newProj.SyncID = syncID;
-            newProj.GitURL = gitUrl;
-
-            var hlpr = new DHMisc();
-
-            // get all projects by the same name
-            ProjectsAndSyncs pas = hlpr.GetProjectsAndSyncByName(newProj.DevProjectName);
-
-            var projectInDevProjects = 
-                pas.ProjectList.Find(
-                    x => x.DevProjectName.Equals(newProj.DevProjectName) &&
-                    x.Machine.Equals(newProj.Machine) &&
-                    x.UserName.Equals(newProj.UserName) &&
-                    x.DevProjectPath.Equals(newProj.DevProjectPath));
-
-            //1. does project exist in DevProjects
-            if (projectInDevProjects != null)
+            // NOTE: newProj, coming from FileAnalyzer has
+            // Name, LocalDevPath, CurrApp, idDBEngine, CountLines, ProjFileExt
+            try
             {
-                // yes, this local project is in devprojects table
-                // is ProjectSync extant?
-                string localSyncID = projectInDevProjects.SyncID;
-                ProjectSync ps = GetProjectSyncIfExtant(newProj, pas, localSyncID, gitUrl);
+                localProj.Machine = Environment.MachineName;
+                localProj.UserName = Environment.UserName;
+                localProj.CreatedDate = DateTime.Now;
+                string localGitUrl = GetGitURLFromPath(fullPath);
+                //not sure why after git clone, the girUrl does not end with .git
+                // here is why https://github.com/jonschlinkert/is-git-url/issues/8
+                // the above link says that it does not have to, an obvious inconsistency
+                // however, since we are using the girUrl in DevProjects and ProjectSync to 
+                // separate the possibility of the same name for unrelated projects, keep it ending
+                // with ".git" in the url, this does not affect git, only the two database tables
+                if (!string.IsNullOrWhiteSpace(localGitUrl) && !localGitUrl.EndsWith(".git"))
+                    localGitUrl += ".git";
+                var hlpr = new DHMisc();
 
-                // is there a ProjectSync record, extant only if gitUrl extant
-                if (ps != null)
+                // get all projects and projectSync rows by the same project name
+                ProjectsAndSyncs devProjectsAndSyncs = hlpr.GetProjectsAndSyncByName(localProj.DevProjectName);
+
+                // is local project in DevProjects table?
+                var theProjectInDevProjects =
+                    devProjectsAndSyncs.ProjectList.Find(
+                        x => x.DevProjectName.Equals(localProj.DevProjectName) &&
+                        x.Machine.Equals(localProj.Machine) &&
+                        x.UserName.Equals(localProj.UserName) &&
+                        x.DevProjectPath.Equals(localProj.DevProjectPath));
+
+                if (theProjectInDevProjects != null)
                 {
-                    // yes, ProjectSync and DevProjects all set up, 
-                    // get file stats and log to ProjectFiles
-                    UpdateProjectFiles(newProj, fullPath, hlpr);
-                }
-                else // in DevProjects but no ProjectSync row
-                {
-                    // is local project in github
-                    if (string.IsNullOrWhiteSpace(gitUrl))
+                    theProjectInDevProjects.CountLines = localProj.CountLines;
+                    // local project is in DevProjects
+                    // is gitUrl in local file path?
+                    if (!string.IsNullOrWhiteSpace(localGitUrl))
                     {
-                        // no, we can't create a sync row w/o gitUrl
-                        UpdateProjectFiles(newProj, fullPath, hlpr);
+                        // yes localGitUrl extant, is GitURL in the DevProjects row?
+                        if (!string.IsNullOrWhiteSpace(theProjectInDevProjects.GitURL))
+                        {
+                            // possible that the local proj was put in gitHub and ProjSync 
+                            // not yet updated
+                            if (theProjectInDevProjects.GitURL.Equals(localGitUrl))
+                            {
+                                // project and sync rows good, just update the file
+                                UpdateProjectFiles(theProjectInDevProjects, fullPath, hlpr);
+                                return;
+                            }
+                            else
+                            {
+                                // no, update devprojects and projectsync with localgiturl and update the file table
+                                theProjectInDevProjects.GitURL = localGitUrl;
+                                _ = hlpr.InsertUpdateDevProject(theProjectInDevProjects);
+                                var ps = devProjectsAndSyncs.ProjectSyncList.Find(x => x.ID == theProjectInDevProjects.SyncID);
+                                ps.GitURL = localGitUrl;
+                                _ = hlpr.UpdateProjectSyncWithGitURL(ps);
+
+                                //NOTE: since we updated Devprojects with giturl, we need to
+                                // update the files table
+                                _ = hlpr.UpdateProjectFilesWithGitURL(localGitUrl, theProjectInDevProjects.DevProjectName, theProjectInDevProjects.SyncID);
+                                // since the giturl originally matched the project name and now matches localgirurl we could
+                                // have created duplicate copies of the same relativefilename in the ProjectFiles table
+                                // this next line will remove all dupes and leave the last updated row
+                                RemoveDuplicateProjectFiles(theProjectInDevProjects.DevProjectName, theProjectInDevProjects.SyncID, hlpr);
+                                // now update the current file 
+                                _ = UpdateProjectFiles(theProjectInDevProjects, fullPath, hlpr);
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            _ = UpdateProjectFiles(theProjectInDevProjects, fullPath, hlpr);
+                            return;
+                        }
                     }
-                    else // this local project is in gitHub, no ProjectSync yet
+                    else
                     {
-                        // insert ProjectSync, update DevProjects with syncID and URL
-                        // update ProjectFiles with file data
-                        InsertUpdateProjetSync(newProj, hlpr);
-                        hlpr.UpdateDevProjectsWithSyncIDAndGitURL(newProj);
-                        UpdateProjectFiles(newProj, fullPath, hlpr);
+                        // we have no localGitUrl
+                        if (string.IsNullOrWhiteSpace(theProjectInDevProjects.GitURL))
+                            theProjectInDevProjects.GitURL = theProjectInDevProjects.DevProjectName;
+                        _ = UpdateProjectFiles(theProjectInDevProjects, fullPath, hlpr);
+                        return;
+                    }
+                }
+                else
+                {
+                    // local project not in DevProjects
+                    // is this local project in gitHub?
+                    if (!string.IsNullOrWhiteSpace(localGitUrl))
+                    {
+                        // yes localproject is in github
+                        // is there a ProjectSync that matches the localGitUrl
+                        var ps = devProjectsAndSyncs.ProjectSyncList.Find(x => x.GitURL == localGitUrl);
+                        if (ps != null)
+                        {
+                            // yes, we have a sync row that matches local project gitUrl, 
+                            // insert local project into DevProjects
+                            localProj.ID = Guid.NewGuid().ToString();
+                            localProj.GitURL = localGitUrl;
+                            localProj.SyncID = ps.ID;
+                            _ = hlpr.InsertUpdateDevProject(localProj);
+                            _ = UpdateProjectFiles(localProj, fullPath, hlpr);
+                            return;
+                        }
+                        else
+                        {
+                            // insert local project in DevProjects with GitURL
+                            // and insert a ProjectSync row with local gitUrl and
+                            // set the ProjectSync ID = DevProjects ID
+                            // set devProjects.GitURL = devProjects.DevProjectName
+                            var id = Guid.NewGuid().ToString();
+                            var date = DateTime.Now;
+                            localProj.SyncID = id;
+                            localProj.GitURL = localGitUrl;
+                            _ = InsertNewDevProjectsRow(localProj, id, localGitUrl, hlpr);
+                            _ = InsertNewProjectSyncRow(localProj, id, localGitUrl, hlpr);
+                            _ = UpdateProjectFiles(localProj, fullPath, hlpr);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        // insert a new project and sync row with the gitUrl set to the projectname b/c 
+                        // the local projct is not in github at least not yet
+                        var id = Guid.NewGuid().ToString();
+                        var date = DateTime.Now;
+                        localProj.ID = id;
+                        localProj.SyncID = id;
+                        localProj.GitURL = localProj.DevProjectName;
+                        InsertNewDevProjectsRow(localProj, id, localProj.DevProjectName, hlpr);
+                        InsertNewProjectSyncRow(localProj, id, localProj.DevProjectName, hlpr);
+                        UpdateProjectFiles(localProj, fullPath, hlpr);
+                        return;
                     }
                 }
             }
-            else // project does not exist in DevProjects
+            catch (Exception ex)
             {
-                // does gitUrl exist?
-                if (string.IsNullOrWhiteSpace(gitUrl))
-                {
-                    // gitUrl does not exist, just insert into DevProjects
-                    // and update ProjectFiles since no gitUrl dont write
-                    // project sync
-                    newProj.SyncID = string.Empty;
-                    newProj.GitURL = string.Empty;
-                    hlpr.InsertUpdateDevProject(newProj);
-                    UpdateProjectFiles(newProj, fullPath, hlpr);
-                }
-                else 
-                {
-                    // yes, gitUrl exists, we must insert into all three tables
-                    // b/c here the project is not in DevProjects, therefore no
-                    // ProjectSync row, and must insert/update ProjectFiles
-                    InsertUpdateProjetSync(newProj, hlpr);
-                    hlpr.InsertUpdateDevProject(newProj);
-                    UpdateProjectFiles(newProj, fullPath, hlpr);
-                }
+                Debug.WriteLine(ex.Message);
             }
         }
 
+        private int InsertNewDevProjectsRow(DevProjPath newProj, string id, string gitUrl, DHMisc hlpr)
+        {
+            var createdDate = DateTime.Now;
+            newProj.ID = id;
+            newProj.GitURL = gitUrl;
+            newProj.SyncID = id;
+            newProj.DatabaseProject = false;
+            newProj.CreatedDate = createdDate;
+            return hlpr.InsertUpdateDevProject(newProj);
+        }
 
-        //TODO: add SyncID to WindowEvents Table
+        /// <summary>
+        /// Since a project file can be saved before we get the proper gitUrl in
+        /// the DevProjects & ProjectSync tables, we can get multiple copies (at least 2)
+        /// of the same relative filename for the same project. This method removes any 
+        /// except the latest so we dont get duplicate reporting
+        /// </summary>
+        /// <param name="devProjectName"></param>
+        /// <param name="syncID"></param>
+        private void RemoveDuplicateProjectFiles(string devProjectName, string syncID, DHMisc hlpr)
+        {
+            var projectFiles = hlpr.GetDuplicateProjectFiles(devProjectName, syncID);
+            string relFileName = string.Empty; // projectFiles[0].RelativeFileName;
+            foreach (var item in projectFiles)
+            {
+                if (item.RelativeFileName == relFileName)
+                {
+                    _ = hlpr.DeleteDuplicateProjectFile(item.ID);
+                    continue;
+                }
+                relFileName = item.RelativeFileName;
+            }
+        }
+
+        private int InsertNewProjectSyncRow(DevProjPath newProj, string id, string gitUrl, DHMisc hlpr)
+        {
+            var ps = new ProjectSync
+            {
+                ID = id,
+                DevProjectName = newProj.DevProjectName,
+                DevProjectCount = 1,
+                GitURL = gitUrl,
+                CreatedDate = DateTime.Now
+            };
+            return hlpr.InsertProjectSyncObject(ps);
+        }
+
         /// <summary>
         /// This method is to be used by WindowEvents so we can put a SyncID
         /// and GitUrl in the WindowEvent to try to tie the time charges to
@@ -226,9 +261,114 @@ namespace DevProjects
                 pas.ProjectList.Find(
                     x => x.DevProjectName.Equals(projName) &&
                     x.Machine.Equals(Environment.MachineName) &&
-                    x.UserName.Equals(Environment.UserName)); // &&
-                                                  //x.DevProjectPath.Equals(newProj.DevProjectPath));
+                    x.UserName.Equals(Environment.UserName) && 
+                    x.IDEAppName == appName); 
+                    // &&
+                    //x.DevProjectPath.Equals(newProj.DevProjectPath));
             return projectInDevProjects != null ? projectInDevProjects.SyncID : null;
+        }
+
+        /// <summary>
+        /// A git config file was saved, try to find the project directory
+        /// so we can see if the project is in DevProjects, must find a known IDE project file
+        /// Example filePath: C:\VS2019 Projects\MyProject\.git\config
+        /// </summary>
+        /// <param name="filePath"></param>
+        /// <returns>Tuple<devProjectName, Path, projectFieExtension></returns>
+        public Tuple<string, string, string> GetProjectFromGitConfigSaved(string filePath, List<NotableFileExtension> notableExtensions)
+        {
+            try
+            {
+                if (!filePath.ToLower().EndsWith(@"\.git\config")) return null;
+                // back up to base directory to find the project file
+                var basePath = Path.GetDirectoryName(filePath);
+                basePath = Path.GetDirectoryName(basePath);
+                var name = Path.GetFileNameWithoutExtension(basePath);
+                var ext = notableExtensions.Find(x => x.Extension == "config");
+                if (ext == null) return null;
+
+                List<string> directories = GetDirectories(basePath);
+                directories.Insert(0, basePath);
+                foreach (var dir in directories)
+                {
+                    Console.WriteLine(dir);
+                    var tuple = CheckForProjectFileInDirectoryForExtension(dir, ext, name);
+                    if (tuple != null) return tuple;
+                }
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// This method can determine if a project name exits
+        /// </summary>
+        /// <param name="path"></param>
+        /// <param name="ext = NotableFileExtension object for a config file which has all proj file extensions"></param>
+        /// <param name="fileName"></param>
+        /// <returns></returns>
+        public Tuple<string, string, string> CheckForProjectFileInDirectoryForExtension(string path, NotableFileExtension ext, string fileName)
+        {
+            try
+            {
+                string[] extensions = ext.IDEProjectExtension.Split('|');
+                for (int i = 0; i < extensions.Length; i++)
+                {
+                    string fullFileName = Path.Combine(path, $"{fileName}.{extensions[i]}");
+                    if (File.Exists(fullFileName))
+                    {
+                        return Tuple.Create(fileName, path, extensions[i]);
+                    }
+                }
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.Message);
+                return null;
+            }
+        }
+
+        public NotableFileExtension GetExtensionObject(List<NotableFileExtension> extensions, string ext)
+        {
+            return extensions.Find(x => x.Extension.ToLower() == ext);
+        }
+
+        public List<string> GetDirectories(string path, string searchPattern = "*",
+            SearchOption searchOption = SearchOption.AllDirectories)
+        {
+            if (searchOption == SearchOption.TopDirectoryOnly)
+                return Directory.GetDirectories(path, searchPattern).ToList();
+
+            var directories = new List<string>(GetDirectories(path, searchPattern));
+
+            for (var i = 0; i < directories.Count; i++)
+            {
+                // for DevTracker Purposes we are not interested in the following folders
+                // they will not contain the project.xxproj file
+                if (directories[i].Contains(".git") 
+                    || directories[i].Contains(".vs") 
+                    || directories[i].Contains("packages")) continue;
+                directories.AddRange(GetDirectories(directories[i], searchPattern));
+            }
+
+            return directories;
+        }
+
+        private List<string> GetDirectories(string path, string searchPattern)
+        {
+            try
+            {
+                return Directory.GetDirectories(path, searchPattern).ToList();
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return new List<string>();
+            }
         }
 
         private void InsertUpdateProjetSync(DevProjPath newProj, DHMisc hlpr)
@@ -244,13 +384,23 @@ namespace DevProjects
             hlpr.InsertUpdateProjectSync(ps);
         }
 
-        private void UpdateProjectFiles(DevProjPath newProj, string fullPath, DHMisc hlpr)
+        //TODO: if a dev file gets saved before we have a syncid and giturl and
+        // then that devprojects row gets a syncid, somehow we need to be able to 
+        // mark the original file  so that it can be updated...
+        // e.g., if the syncid and giturl are not filled, but we know the projectname before
+        // we save the file, we could put the projectname in the giturl and when we get the
+        // giturl and thus the sycnid, we can update where giturl = devprojectname
+        // Currently, a file must be saved in a known project path or we don't save it
+        // in ProjectFiles, so theoritically we now know the projectname even if we don't
+        // have girUrl yet   this area has still to be thought thru....
+        public int UpdateProjectFiles(DevProjPath newProj, string fullPath, DHMisc hlpr)
         {
             if (newProj.CountLines)
                 CountLines(fullPath);
             ProjectFiles pf = GetProjectFilesObject(newProj, fullPath);
-            var rows = hlpr.InsertUpdateProjectFiles(pf);
+            return hlpr.InsertUpdateProjectFiles(pf);
         }
+
         private ProjectFiles GetProjectFilesObject(DevProjPath newProj, string fullPath)
         {
             ProjectFiles item = new ProjectFiles
@@ -269,11 +419,11 @@ namespace DevProjects
             return item;
         }
 
-        private ProjectSync GetProjectSyncIfExtant(DevProjPath newProj, ProjectsAndSyncs pas, string syncID, string gitUrl )
+        private ProjectSync GetProjectSyncIfExtant(DevProjPath newProj, ProjectsAndSyncs pas, string gitUrl )
         {
             ProjectSync ps = pas.ProjectSyncList.Find(
                 x => x.DevProjectName.Equals(newProj.DevProjectName) &&
-                x.ID.Equals(syncID) &&
+                x.ID.Equals(newProj.SyncID) &&
                 x.GitURL.Equals(gitUrl));
             return ps;
         }
@@ -289,31 +439,6 @@ namespace DevProjects
                 designerLines = CodeCounter.numberLinesInDesignerFiles;
             }
         }
-
-        //public SyncID GetMostUsedSyncID(List<DevProjPath> projList)
-        //{
-        //    List<SyncID> sids = new List<SyncID>();
-        //    sids.Add(new SyncID { SID = projList[0].SyncID, Count = 0 });
-
-        //    string lastSid = projList[0].SyncID;
-        //    int ctr = 0;
-        //    foreach (var devPP in projList)
-        //    {
-        //        if (devPP.SyncID.Equals(lastSid))
-        //        {
-        //            sids[ctr].Count++;
-        //            continue;
-        //        }
-
-        //        ctr++;
-        //        lastSid = devPP.SyncID;
-        //        sids.Add(new SyncID { SID = devPP.SyncID, Count = 1 });
-        //    }
-
-        //    // now we sort the List<SIDS> to get the most popular
-        //    List<SyncID> sortedSids = sids.OrderBy(o => o.Count).ToList();
-        //    return sortedSids[0];
-        //}
 
         /// <summary>
         /// Probably used once to update sln path which was not in
@@ -352,17 +477,55 @@ namespace DevProjects
         {
             var hlpr = new DHMisc();
             List<DevProjPath> projects = hlpr.GetDevProjects();
-            var ctr = 1;
+            //var ctr = 1;
             var currDate = DateTime.Now;
             foreach (var project in projects)
             {
                 if (!project.DatabaseProject)
                 {
+                    if (!string.IsNullOrWhiteSpace(project.SyncID)) continue;
+
                     var projectSync = GetNewProjectSyncObject(project, currDate);
+
+                    // gitUrl will be empty if the project is not in gitHub
+                    // if so, put project name in gitUrl so it can be updated later
                     hlpr.InsertProjectSyncObject(projectSync);
+                    project.SyncID = projectSync.ID;
+                    project.GitURL = projectSync.GitURL;
+                    hlpr.UpdateDevProjectsWithSyncIDAndGitURL(project);
                 }
             }
         }
+
+        /// <summary>
+        /// This method finds the project name from the path of
+        /// a Development file (cs, vb, etc.)
+        /// </summary>
+        /// <param name="fullPath"></param>
+        /// <param name="extList"></param>
+        /// <param name="ext"></param>
+        /// <returns></returns>
+        public Tuple<string, string, string> GetProjectFromDevFileSave(string fullPath, List<NotableFileExtension> extList, string ext)
+        {
+            var tmpPath = Path.GetDirectoryName(fullPath);
+            var extObj = extList.Find(x => x.Extension.ToLower().Equals(ext));
+            if (extObj == null) 
+                return null;
+
+            while (!string.IsNullOrWhiteSpace(tmpPath))
+            {
+                string[] exts = extObj.IDEProjectExtension.Split('|');
+                foreach (var e in exts)
+                {
+                    string[] files = Directory.GetFiles(tmpPath, $"*.{e}");
+                    if (files.Length > 0)
+                        return Tuple.Create(Path.GetFileName(tmpPath), tmpPath, e);
+                }
+                tmpPath = Path.GetDirectoryName(tmpPath);
+            }
+            return null;
+        }
+
 
         /// <summary>
         /// If a project is in github, its Url will be in the path
@@ -380,8 +543,10 @@ namespace DevProjects
                     fileName = Path.GetFileNameWithoutExtension(urlPath);
 
                 if (fileName.ToLower().Equals("config"))
-                    return GetGitURLFromConfigFile(fileName);
+                    return GetGitURLFromConfigFile(urlPath);
                 // we are not in the directory where config file is
+                if (string.IsNullOrWhiteSpace(Path.GetDirectoryName(urlPath)))
+                    return string.Empty;
                 var tryPath = Path.Combine(Path.GetDirectoryName(urlPath), ".git\\config");
                 if (File.Exists(tryPath))
                     return GetGitURLFromConfigFile(tryPath);
@@ -423,7 +588,7 @@ namespace DevProjects
             return string.Empty;
         }
         private ProjectSync GetNewProjectSyncObject(DevProjPath project, DateTime currDate)
-        {
+         {
             var syncID = Guid.NewGuid().ToString();
             //var projID = Guid.NewGuid().ToString();
 
@@ -438,13 +603,14 @@ namespace DevProjects
             string projFileName = Path.Combine(project.DevProjectPath, $"{project.DevProjectName}.{project.ProjFileExt}");
             //int projFileCount = File.Exists(projFileName) ?
             //    new ProcessProject(projFileName).FileList.Count : 0;
-
+            var url = GetGitURLFromPath(projFileName);
             var projectSync = new ProjectSync
             {
                 ID = syncID,
                 DevProjectName = project.DevProjectName,
                 CreatedDate = currDate,
-                GitURL = project.GitURL,
+                GitURL = !string.IsNullOrWhiteSpace(project.GitURL) ? project.GitURL : !string.IsNullOrWhiteSpace(url) ? url : project.DevProjectName,
+                DevProjectCount = 1
             };
             return projectSync;
         }
@@ -465,7 +631,11 @@ namespace DevProjects
             string projectRelativePath = fullPath.ToLower().Replace(devProjectPath.ToLower(), string.Empty);
             return projectRelativePath;
         }
+        public DevProjPath IsFileInADevProjectPath(string fullPath)
+        {
+            var hlpr = new DataHelpers.DHFileWatcher();
+            return hlpr.IsFileInDevPrjPath(fullPath);
+        }
     }
-
     #endregion
 }
