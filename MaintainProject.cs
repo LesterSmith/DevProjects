@@ -257,15 +257,20 @@ namespace DevProjects
 
             // get all projects by the same name
             ProjectsAndSyncs pas = hlpr.GetProjectsAndSyncByName(projName);
+
+            // if we find a local project by user/machine we will assume that is the
+            // project this user is working on, if the user/machine has two projects
+            // by the same name, one for local use and one for collaboration, they are
+            // asking for trouble and this code will assume the standalone project
+            // b/c we don't have a path except the one that we may find with the following
+            // statement so we have no way to straighten out their convoluted development process
             var projectInDevProjects =
                 pas.ProjectList.Find(
                     x => x.DevProjectName.Equals(projName) &&
                     x.Machine.Equals(Environment.MachineName) &&
                     x.UserName.Equals(Environment.UserName) && 
                     x.IDEAppName == appName); 
-                    // &&
-                    //x.DevProjectPath.Equals(newProj.DevProjectPath));
-            return projectInDevProjects != null ? projectInDevProjects.SyncID : null;
+           return projectInDevProjects != null ? projectInDevProjects.SyncID : null;
         }
 
         /// <summary>
