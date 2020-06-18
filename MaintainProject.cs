@@ -7,14 +7,9 @@ using BusinessObjects;
 using DataHelpers;
 using CodeCounter;
 using System.Diagnostics;
+using AppWrapper;
 namespace DevProjects
 {
-    public enum ProjectStatus
-    {
-        Exists = 0,
-        Created = 1
-    }
-
     /// <summary>
     /// This class adds new DevProjects and maintains ProjectSync Table
     /// The whole reason for the ProjectSync table is that different developers
@@ -50,7 +45,7 @@ namespace DevProjects
 
         #region public methods
 
-        public void CheckForInsertingNewProjectPath(DevProjPath localProj, string fullPath) 
+        public string CheckForInsertingNewProjectPath(DevProjPath localProj, string fullPath) 
         {
             // NOTE: newProj, coming from FileAnalyzer has
             // Name, LocalDevPath, CurrApp, idDBEngine, CountLines, ProjFileExt
@@ -97,7 +92,7 @@ namespace DevProjects
                             {
                                 // project and sync rows good, just update the file
                                 UpdateProjectFiles(theProjectInDevProjects, fullPath, hlpr);
-                                return;
+                                return theProjectInDevProjects.SyncID;
                             }
                             else
                             {
@@ -117,13 +112,13 @@ namespace DevProjects
                                 RemoveDuplicateProjectFiles(theProjectInDevProjects.DevProjectName, theProjectInDevProjects.SyncID, hlpr);
                                 // now update the current file 
                                 _ = UpdateProjectFiles(theProjectInDevProjects, fullPath, hlpr);
-                                return;
+                                return theProjectInDevProjects.SyncID;
                             }
                         }
                         else
                         {
                             _ = UpdateProjectFiles(theProjectInDevProjects, fullPath, hlpr);
-                            return;
+                            return theProjectInDevProjects.SyncID;
                         }
                     }
                     else
@@ -132,7 +127,7 @@ namespace DevProjects
                         if (string.IsNullOrWhiteSpace(theProjectInDevProjects.GitURL))
                             theProjectInDevProjects.GitURL = theProjectInDevProjects.DevProjectName;
                         _ = UpdateProjectFiles(theProjectInDevProjects, fullPath, hlpr);
-                        return;
+                        return theProjectInDevProjects.SyncID;
                     }
                 }
                 else
@@ -151,9 +146,12 @@ namespace DevProjects
                             localProj.ID = Guid.NewGuid().ToString();
                             localProj.GitURL = localGitUrl;
                             localProj.SyncID = ps.ID;
+                            localProj.DevSLNPath = FindSLNFileFromProjectPath(localProj);
                             _ = hlpr.InsertUpdateDevProject(localProj);
+                            // update the nbr projects linked to this sync row
+                            _ = hlpr.InsertUpdateProjectSync(ps);
                             _ = UpdateProjectFiles(localProj, fullPath, hlpr);
-                            return;
+                            return localProj.SyncID;
                         }
                         else
                         {
@@ -164,11 +162,11 @@ namespace DevProjects
                             var id = Guid.NewGuid().ToString();
                             var date = DateTime.Now;
                             localProj.SyncID = id;
-                            localProj.GitURL = localGitUrl;
+                            localProj.GitURL = localGitUrl; localProj.DevSLNPath = FindSLNFileFromProjectPath(localProj);
                             _ = InsertNewDevProjectsRow(localProj, id, localGitUrl, hlpr);
                             _ = InsertNewProjectSyncRow(localProj, id, localGitUrl, hlpr);
                             _ = UpdateProjectFiles(localProj, fullPath, hlpr);
-                            return;
+                            return  localProj.SyncID;
                         }
                     }
                     else
@@ -180,16 +178,18 @@ namespace DevProjects
                         localProj.ID = id;
                         localProj.SyncID = id;
                         localProj.GitURL = localProj.DevProjectName;
+                        localProj.GitURL = localGitUrl; localProj.DevSLNPath = FindSLNFileFromProjectPath(localProj);
                         InsertNewDevProjectsRow(localProj, id, localProj.DevProjectName, hlpr);
                         InsertNewProjectSyncRow(localProj, id, localProj.DevProjectName, hlpr);
                         UpdateProjectFiles(localProj, fullPath, hlpr);
-                        return;
+                        return localProj.SyncID;
                     }
                 }
             }
             catch (Exception ex)
             {
-                Debug.WriteLine(ex.Message);
+                Util.LogError(ex,true);
+                return null;
             }
         }
 
@@ -267,8 +267,8 @@ namespace DevProjects
             var projectInDevProjects =
                 pas.ProjectList.Find(
                     x => x.DevProjectName.Equals(projName) &&
-                    x.Machine.Equals(Environment.MachineName) &&
-                    x.UserName.Equals(Environment.UserName) && 
+                    //x.Machine.Equals(Environment.MachineName) &&
+                    //x.UserName.Equals(Environment.UserName) && 
                     x.IDEAppName == appName); 
            return projectInDevProjects != null ? projectInDevProjects.SyncID : null;
         }
@@ -304,7 +304,7 @@ namespace DevProjects
             }
             catch (Exception ex)
             {
-                Debug.WriteLine(ex.Message);
+                Util.LogError(ex);
                 return null;
             }
         }
@@ -333,7 +333,7 @@ namespace DevProjects
             }
             catch (Exception ex)
             {
-                Debug.WriteLine(ex.Message);
+                Util.LogError(ex);
                 return null;
             }
         }
@@ -400,6 +400,12 @@ namespace DevProjects
         // have girUrl yet   this area has still to be thought thru....
         public int UpdateProjectFiles(DevProjPath newProj, string fullPath, DHMisc hlpr)
         {
+            if (string.IsNullOrWhiteSpace(newProj.DevProjectName))
+            {
+                Util.LogError($"FileName: {fullPath} has no project file, not recorded in Project Files");
+                return 0;
+            }
+
             if (newProj.CountLines)
                 CountLines(fullPath);
             ProjectFiles pf = GetProjectFilesObject(newProj, fullPath);
@@ -575,7 +581,8 @@ namespace DevProjects
                 sr.Close();
             }
             var re = Regex.Match(config, patt);
-            return re.Success && !string.IsNullOrWhiteSpace(re.Groups["url"].Value) ? re.Groups["url"].Value : string.Empty;
+            string url = re.Success && !string.IsNullOrWhiteSpace(re.Groups["url"].Value) ? re.Groups["url"].Value : string.Empty;
+            return string.IsNullOrWhiteSpace(url) ? string.Empty : url.ToLower().EndsWith(".git") ? url : url + ".git";
         }
         public string FindSLNFileFromProjectPath(DevProjPath project)
         {
@@ -632,9 +639,10 @@ namespace DevProjects
         /// <returns>project relative filename</returns>
         private string GetRelativeFileName(string fullPath, string devPath)
         {
-            string devProjectPath = !devPath.EndsWith(@"\") ? devPath + @"\" : devPath;
-            string projectRelativePath = fullPath.ToLower().Replace(devProjectPath.ToLower(), string.Empty);
-            return projectRelativePath;
+            //string devProjectPath = !devPath.EndsWith(@"\") ? devPath + @"\" : devPath;
+            //string projectRelativePath = fullPath.ToLower().Replace(devProjectPath.ToLower(), string.Empty);
+            //return projectRelativePath;
+            return fullPath.Substring(devPath.Length + 1);
         }
         public DevProjPath IsFileInADevProjectPath(string fullPath)
         {
