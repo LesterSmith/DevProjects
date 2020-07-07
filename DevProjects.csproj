@@ -61,6 +61,10 @@
       <Project>{d9b4d5fa-6a12-4e45-9ae5-1a55a300ef1a}</Project>
       <Name>DataHelpers</Name>
     </ProjectReference>
+    <ProjectReference Include="..\DevTrackerLogging\DevTrackerLogging.csproj">
+      <Project>{99b62566-4a12-45a3-9264-29563ed3784b}</Project>
+      <Name>DevTrackerLogging</Name>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

@@ -8,6 +8,7 @@ using DataHelpers;
 using CodeCounter;
 using System.Diagnostics;
 using AppWrapper;
+using DevTrackerLogging;
 namespace DevProjects
 {
     /// <summary>
@@ -44,13 +45,20 @@ namespace DevProjects
         #endregion
 
         #region public methods
-
+        //TODO find why the new db project has 2 developers
+        /// <summary>
+        /// Called only from FileAnalyzer to check for inserting a new IDE project.
+        /// the overload below is called by WindowEvents to possibly add a ne DB project.
+        /// </summary>
+        /// <param name="localProj"></param>
+        /// <param name="fullPath"></param>
+        /// <returns></returns>
         public string CheckForInsertingNewProjectPath(DevProjPath localProj, string fullPath) 
         {
+            //TODO: somehow weed out "Installer" projects but Installer could be a project %#@&*
+            // b/c devenv is doing an install into ....\Program Files
             // NOTE: newProj, coming from FileAnalyzer has
             // Name, LocalDevPath, CurrApp, idDBEngine, CountLines, ProjFileExt
-            try
-            {
                 localProj.Machine = Environment.MachineName;
                 localProj.UserName = Environment.UserName;
                 localProj.CreatedDate = DateTime.Now;
@@ -87,7 +95,7 @@ namespace DevProjects
                         if (!string.IsNullOrWhiteSpace(theProjectInDevProjects.GitURL))
                         {
                             // possible that the local proj was put in gitHub and ProjSync 
-                            // not yet updated
+                            // not yet updated with the localGitURL
                             if (theProjectInDevProjects.GitURL.Equals(localGitUrl))
                             {
                                 // project and sync rows good, just update the file
@@ -162,7 +170,8 @@ namespace DevProjects
                             var id = Guid.NewGuid().ToString();
                             var date = DateTime.Now;
                             localProj.SyncID = id;
-                            localProj.GitURL = localGitUrl; localProj.DevSLNPath = FindSLNFileFromProjectPath(localProj);
+                            localProj.GitURL = localGitUrl; 
+                            localProj.DevSLNPath = FindSLNFileFromProjectPath(localProj);
                             _ = InsertNewDevProjectsRow(localProj, id, localGitUrl, hlpr);
                             _ = InsertNewProjectSyncRow(localProj, id, localGitUrl, hlpr);
                             _ = UpdateProjectFiles(localProj, fullPath, hlpr);
@@ -185,12 +194,32 @@ namespace DevProjects
                         return localProj.SyncID;
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                Util.LogError(ex,true);
-                return null;
-            }
+        }
+
+        /// <summary>
+        /// Called from WindowEvents to check for inserting a new database project.
+        /// We can do that here b/c we don't need/have a devPath for DB Projects.
+        /// The overload above is only called from FileAnalyzer for IDE projects.
+        /// </summary>
+        /// <param name="localProj"></param>
+        /// <returns></returns>
+        public string CheckForInsertingNewProjectPath(DevProjPath localProj)
+        {
+            var hlpr = new DHMisc();
+            DevProjPath proj = hlpr.GetDevDBProjectByName(localProj.DevProjectName);
+
+            if (proj != null)
+                return proj.SyncID;
+
+            // insert local project in DevProjects with GitURL
+            // and insert a ProjectSync row with local gitUrl and
+            // set the ProjectSync ID = DevProjects ID
+            // set devProjects.GitURL = devProjects.DevProjectName
+            var id = Guid.NewGuid().ToString();
+            var date = DateTime.Now;
+            _ = InsertNewDevProjectsRow(localProj, id, localProj.GitURL, hlpr);
+            _ = InsertNewProjectSyncRow(localProj, id, localProj.GitURL, hlpr);
+            return localProj.SyncID;
         }
 
         private int InsertNewDevProjectsRow(DevProjPath newProj, string id, string gitUrl, DHMisc hlpr)
@@ -199,7 +228,7 @@ namespace DevProjects
             newProj.ID = id;
             newProj.GitURL = gitUrl;
             newProj.SyncID = id;
-            newProj.DatabaseProject = false;
+            //newProj.DatabaseProject = false;
             newProj.CreatedDate = createdDate;
             return hlpr.InsertUpdateDevProject(newProj);
         }
@@ -247,11 +276,8 @@ namespace DevProjects
         /// ProjectName, AppName, Machine, and Username.
         /// </summary>
         /// <param name="projName"></param>
-        /// <param name ="appName"></param>
-        /// <param name ="userName"></param>
-        /// <param name ="machine"></param>
         /// <returns>ProjectSync object</returns>
-        public string GetProjectSyncIDForProjectName(string projName, string appName)
+        public string GetProjectSyncIDForProjectName(string projName) //, string appName)
         {
             var hlpr = new DHMisc();
 
@@ -264,12 +290,13 @@ namespace DevProjects
             // asking for trouble and this code will assume the standalone project
             // b/c we don't have a path except the one that we may find with the following
             // statement so we have no way to straighten out their convoluted development process
+            //TODO: if there are multiple projects by the same name here we have a problem
             var projectInDevProjects =
                 pas.ProjectList.Find(
-                    x => x.DevProjectName.Equals(projName) &&
+                    x => x.DevProjectName.Equals(projName)); // &&
                     //x.Machine.Equals(Environment.MachineName) &&
                     //x.UserName.Equals(Environment.UserName) && 
-                    x.IDEAppName == appName); 
+                    //(x.IDEAppName.ToLower() == appName.ToLower() || 1==1)); 
            return projectInDevProjects != null ? projectInDevProjects.SyncID : null;
         }
 
@@ -304,7 +331,7 @@ namespace DevProjects
             }
             catch (Exception ex)
             {
-                Util.LogError(ex);
+                _ = new LogError(ex, false, "MaintainProject.GetProjectFromGitConfigSaved");
                 return null;
             }
         }
@@ -332,8 +359,8 @@ namespace DevProjects
                 return null;
             }
             catch (Exception ex)
-            {
-                Util.LogError(ex);
+            { 
+            
                 return null;
             }
         }
@@ -402,8 +429,7 @@ namespace DevProjects
         {
             if (string.IsNullOrWhiteSpace(newProj.DevProjectName))
             {
-                Util.LogError($"FileName: {fullPath} has no project file, not recorded in Project Files");
-                return 0;
+                throw new Exception($"FileName: {fullPath} has no project file, not recorded in Project Files");
             }
 
             if (newProj.CountLines)
@@ -481,6 +507,18 @@ namespace DevProjects
             }
         }
 
+        public void UpdateSLNPathInProject(DevProjPath dpp)
+        {
+            var hlpr = new DHMisc();
+            var devProjects = hlpr.GetDevProjects();
+            var devProject = devProjects.Find(x => x.DevProjectName == dpp.DevProjectName && x.SyncID == dpp.SyncID);
+            if (devProject != null && string.IsNullOrWhiteSpace(devProject.DevSLNPath))
+            {
+                devProject.DevSLNPath = dpp.DevSLNPath;
+                _ = hlpr.UpdateSLNPathInDevProject(devProject);
+            }
+        }
+
         /// <summary>
         /// Probably one time usage
         /// </summary>
@@ -529,7 +567,7 @@ namespace DevProjects
                 foreach (var e in exts)
                 {
                     string[] files = Directory.GetFiles(tmpPath, $"*.{e}");
-                    if (files.Length > 0)
+                    if (files.Length > 0 && !string.IsNullOrWhiteSpace(Path.GetFileName(tmpPath)))
                         return Tuple.Create(Path.GetFileName(tmpPath), tmpPath, e);
                 }
                 tmpPath = Path.GetDirectoryName(tmpPath);
