@@ -76,7 +76,13 @@ namespace DevProjects
                 // get all projects and projectSync rows by the same project name
                 ProjectsAndSyncs devProjectsAndSyncs = hlpr.GetProjectsAndSyncByName(localProj.DevProjectName);
 
-                // is local project in DevProjects table?
+                // is "local" project in DevProjects table? YES and there will be multiple
+                // projects with the same name and the same girURL with diff machine/user
+                // (for a collaboration project)
+                // but they will all point to the same ProjecSync row so.................
+                // DON'T RE-QUESTION THE LOGIC OF LOCAL PATH, USER, MACHINE
+                // WITHOUT PATH YOU CAN'T FIND gitURL AND W/O MACHINE/USER
+                // YOU CAN'T FIND RIGHT PATH !!!!!!!!!!!
                 var theProjectInDevProjects =
                     devProjectsAndSyncs.ProjectList.Find(
                         x => x.DevProjectName.Equals(localProj.DevProjectName) &&
